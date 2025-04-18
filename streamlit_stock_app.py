@@ -3,10 +3,10 @@ import pandas as pd
 import plotly.express as px
 
 st.set_page_config(page_title="Stock Analyzer", layout="wide")
-st.title("📈 Stock Analyzer with Alerts")
+st.title("📈 NSE Bhavcopy Analyzer with Alerts")
 
 # === File Upload ===
-uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+uploaded_file = st.file_uploader("Upload NSE BhavCopy CSV", type=["csv"])
 
 @st.cache_data
 def load_data(file):
@@ -15,65 +15,60 @@ def load_data(file):
 
 if uploaded_file:
     df = load_data(uploaded_file)
-    
-    # === Validate Columns ===
-    required_columns = {'Date', 'Stock', 'Price', 'Volume'}
+
+    # === Required Columns ===
+    required_columns = {'TradDt', 'ISIN', 'TckrSymb', 'ClsPric', 'TtlTradgVol'}
     if not required_columns.issubset(df.columns):
         st.warning(f"Missing columns: {required_columns - set(df.columns)}")
         st.stop()
 
-    df['Date'] = pd.to_datetime(df['Date'])
-    
-    # === Preview Data ===
+    # === Convert Date ===
+    df['TradDt'] = pd.to_datetime(df['TradDt'])
+
+    # === Preview ===
     with st.expander("🔍 Preview Uploaded Data"):
         st.dataframe(df.head())
 
-    # === Filter by Date Range ===
+    # === Date Range Filter ===
     st.subheader("📆 Date Filter")
-    min_date, max_date = df['Date'].min(), df['Date'].max()
+    min_date, max_date = df['TradDt'].min(), df['TradDt'].max()
     start_date, end_date = st.date_input("Select date range", [min_date, max_date], min_value=min_date, max_value=max_date)
+    df = df[(df['TradDt'] >= pd.to_datetime(start_date)) & (df['TradDt'] <= pd.to_datetime(end_date))]
 
-    mask = (df['Date'] >= pd.to_datetime(start_date)) & (df['Date'] <= pd.to_datetime(end_date))
-    df = df.loc[mask]
-
-    # === Alert Settings ===
+    # === Alert Thresholds ===
     st.subheader("⚙️ Alert Settings")
     std_threshold = st.slider("Standard Deviation Threshold", 1.0, 5.0, 2.0)
     volume_multiplier = st.slider("Volume Spike Multiplier", 1.0, 10.0, 3.0)
 
-    # === Group by Stock and Calculate Stats ===
-    stock_groups = df.groupby('Stock')
-
-    alert_rows = []
-    volume_spike_rows = []
-    buzz_rows = []
-
+    # === Group and Analyze by ISIN ===
     alert_df = []
     volume_df = []
-    buzz_df = []
+    buzzing_isins = set()
 
-    for stock, group in stock_groups:
-        group = group.sort_values('Date')
-        price_std = group['Price'].std()
-        price_mean = group['Price'].mean()
-        vol_mean = group['Volume'].mean()
+    for isin, group in df.groupby('ISIN'):
+        group = group.sort_values('TradDt')
+        price_std = group['ClsPric'].std()
+        price_mean = group['ClsPric'].mean()
+        vol_mean = group['TtlTradgVol'].mean()
 
-        group['Price_Alert'] = abs(group['Price'] - price_mean) > (std_threshold * price_std)
-        group['Volume_Spike'] = group['Volume'] > (volume_multiplier * vol_mean)
+        group['Price_Alert'] = abs(group['ClsPric'] - price_mean) > (std_threshold * price_std)
+        group['Volume_Spike'] = group['TtlTradgVol'] > (volume_multiplier * vol_mean)
+
+        if group['Price_Alert'].any():
+            buzzing_isins.add(isin)
 
         alert_df.append(group[group['Price_Alert']])
         volume_df.append(group[group['Volume_Spike']])
 
-        if group['Price_Alert'].any():
-            buzz_rows.append(stock)
-
-    # === Concatenate DataFrames ===
     alert_df = pd.concat(alert_df) if alert_df else pd.DataFrame()
     volume_df = pd.concat(volume_df) if volume_df else pd.DataFrame()
 
-    # === Main Charts ===
+    # === Helper: ISIN to Ticker Map ===
+    isin_map = df[['ISIN', 'TckrSymb']].drop_duplicates().set_index('ISIN')['TckrSymb'].to_dict()
+
+    # === Volume Chart ===
     st.subheader("📊 Volume Over Time")
-    fig = px.bar(df, x='Date', y='Volume', color='Stock', title="Trading Volume")
+    fig = px.bar(df, x='TradDt', y='TtlTradgVol', color='TckrSymb', title="Total Trading Volume by Date")
     st.plotly_chart(fig, use_container_width=True)
 
     # === Alert Display ===
@@ -82,24 +77,26 @@ if uploaded_file:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        with st.expander(f"📍 Buzzing Stocks ({len(set(buzz_rows))})"):
-            if buzz_rows:
-                buzz_set = sorted(set(buzz_rows))
-                st.dataframe(pd.DataFrame(buzz_set, columns=["Buzzing Stocks"]))
+        with st.expander(f"📍 Buzzing Stocks ({len(buzzing_isins)})"):
+            if buzzing_isins:
+                buzz_data = [{'Ticker': isin_map[i], 'ISIN': i} for i in sorted(buzzing_isins)]
+                st.dataframe(pd.DataFrame(buzz_data))
             else:
-                st.write("No stocks triggered buzz alert.")
+                st.write("No buzzing stocks.")
 
     with col2:
         with st.expander(f"🔥 Price Alerts ({len(alert_df)})"):
             if not alert_df.empty:
-                st.dataframe(alert_df[['Date', 'Stock', 'Price']])
+                alert_df['Ticker'] = alert_df['ISIN'].map(isin_map)
+                st.dataframe(alert_df[['TradDt', 'Ticker', 'ClsPric']])
             else:
                 st.write("No price alerts triggered.")
 
     with col3:
         with st.expander(f"📊 Volume Spikes ({len(volume_df)})"):
             if not volume_df.empty:
-                st.dataframe(volume_df[['Date', 'Stock', 'Volume']])
+                volume_df['Ticker'] = volume_df['ISIN'].map(isin_map)
+                st.dataframe(volume_df[['TradDt', 'Ticker', 'TtlTradgVol']])
             else:
                 st.write("No volume spikes detected.")
 
