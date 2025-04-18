@@ -5,7 +5,7 @@ import plotly.express as px
 import requests
 from io import StringIO
 import os
-from bs4 import BeautifulSoup
+from html.parser import HTMLParser
 
 st.set_page_config(page_title="NSE Stock Analyzer", layout="wide")
 st.title("📊 NSE Stock Analyzer with Std Dev & Volume Alerts")
@@ -13,11 +13,22 @@ st.title("📊 NSE Stock Analyzer with Std Dev & Volume Alerts")
 GITHUB_REPO_URL = "https://github.com/Finpro-Sam/stock_analyser"
 RAW_BASE_URL = "https://raw.githubusercontent.com/Finpro-Sam/stock_analyser/main/"
 
+class LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            for attr in attrs:
+                if attr[0] == 'href' and attr[1].endswith('.csv'):
+                    self.links.append(attr[1].split('/')[-1])
+
 def list_csv_files_from_github():
-    response = requests.get(GITHUB_REPO_URL + "/tree/main")
-    soup = BeautifulSoup(response.text, "html.parser")
-    links = soup.find_all("a", class_="js-navigation-open Link--primary")
-    return [link.text for link in links if link.text.endswith(".csv")]
+    response = requests.get(GITHUB_REPO_URL)
+    parser = LinkParser()
+    parser.feed(response.text)
+    return list(set(parser.links))
 
 @st.cache_data
 
