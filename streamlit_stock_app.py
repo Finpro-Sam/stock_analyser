@@ -1,106 +1,117 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 import plotly.express as px
 
-st.set_page_config(page_title="Stock Analyzer", layout="wide")
-st.title("📈 NSE Bhavcopy Analyzer with Alerts")
+st.set_page_config(page_title="NSE Stock Analyzer", layout="wide")
+st.title("📊 NSE Stock Analyzer with Std Dev & Volume Alerts")
 
 # === File Upload ===
 uploaded_file = st.file_uploader("Upload NSE BhavCopy CSV", type=["csv"])
 
 @st.cache_data
+
 def load_data(file):
     df = pd.read_csv(file)
+    df.columns = df.columns.str.strip()
+    df.rename(columns={
+        'TradDt': 'Date',
+        'ISIN': 'ISIN',
+        'TckrSymb': 'Ticker',
+        'ClsPric': 'Price',
+        'TtlTradgVol': 'Volume'
+    }, inplace=True)
+    df['Date'] = pd.to_datetime(df['Date'])
     return df
 
 if uploaded_file:
-    df = load_data(uploaded_file)
+    try:
+        df = load_data(uploaded_file)
 
-    # === Required Columns ===
-    required_columns = {'TradDt', 'ISIN', 'TckrSymb', 'ClsPric', 'TtlTradgVol'}
-    if not required_columns.issubset(df.columns):
-        st.warning(f"Missing columns: {required_columns - set(df.columns)}")
-        st.stop()
+        # Date Filter
+        st.subheader("📆 Date Range Filter")
+        min_date, max_date = df['Date'].min(), df['Date'].max()
+        start_date, end_date = st.date_input("Select date range", [min_date, max_date], min_value=min_date, max_value=max_date)
+        df = df[(df['Date'] >= pd.to_datetime(start_date)) & (df['Date'] <= pd.to_datetime(end_date))]
 
-    # === Convert Date ===
-    df['TradDt'] = pd.to_datetime(df['TradDt'])
+        # Settings
+        st.sidebar.header("⚙️ Settings")
+        std_threshold = st.sidebar.slider("Standard Deviation Threshold", 1.0, 5.0, 2.0)
+        vol_multiplier = st.sidebar.slider("Volume Spike Multiplier", 1.0, 10.0, 3.0)
 
-    # === Preview ===
-    with st.expander("🔍 Preview Uploaded Data"):
-        st.dataframe(df.head())
+        # Group Analysis
+        buzzing_isins = set()
+        alert_df = []
+        volume_df = []
+        analysis_frames = {}
 
-    # === Date Range Filter ===
-    st.subheader("📆 Date Filter")
-    min_date, max_date = df['TradDt'].min(), df['TradDt'].max()
-    start_date, end_date = st.date_input("Select date range", [min_date, max_date], min_value=min_date, max_value=max_date)
-    df = df[(df['TradDt'] >= pd.to_datetime(start_date)) & (df['TradDt'] <= pd.to_datetime(end_date))]
+        for isin, group in df.groupby('ISIN'):
+            group = group.sort_values('Date')
+            price_std = group['Price'].std()
+            price_mean = group['Price'].mean()
+            vol_mean = group['Volume'].mean()
 
-    # === Alert Thresholds ===
-    st.subheader("⚙️ Alert Settings")
-    std_threshold = st.slider("Standard Deviation Threshold", 1.0, 5.0, 2.0)
-    volume_multiplier = st.slider("Volume Spike Multiplier", 1.0, 10.0, 3.0)
+            group['Upper_Band'] = price_mean + std_threshold * price_std
+            group['Lower_Band'] = price_mean - std_threshold * price_std
 
-    # === Group and Analyze by ISIN ===
-    alert_df = []
-    volume_df = []
-    buzzing_isins = set()
+            group['Price_Alert'] = abs(group['Price'] - price_mean) > (std_threshold * price_std)
+            group['Volume_Spike'] = group['Volume'] > (vol_multiplier * vol_mean)
 
-    for isin, group in df.groupby('ISIN'):
-        group = group.sort_values('TradDt')
-        price_std = group['ClsPric'].std()
-        price_mean = group['ClsPric'].mean()
-        vol_mean = group['TtlTradgVol'].mean()
+            if group['Price_Alert'].any():
+                buzzing_isins.add(isin)
 
-        group['Price_Alert'] = abs(group['ClsPric'] - price_mean) > (std_threshold * price_std)
-        group['Volume_Spike'] = group['TtlTradgVol'] > (volume_multiplier * vol_mean)
+            alert_df.append(group[group['Price_Alert']])
+            volume_df.append(group[group['Volume_Spike']])
+            analysis_frames[isin] = group
 
-        if group['Price_Alert'].any():
-            buzzing_isins.add(isin)
+        alert_df = pd.concat(alert_df) if alert_df else pd.DataFrame()
+        volume_df = pd.concat(volume_df) if volume_df else pd.DataFrame()
 
-        alert_df.append(group[group['Price_Alert']])
-        volume_df.append(group[group['Volume_Spike']])
+        isin_map = df[['ISIN', 'Ticker']].drop_duplicates().set_index('ISIN')['Ticker'].to_dict()
 
-    alert_df = pd.concat(alert_df) if alert_df else pd.DataFrame()
-    volume_df = pd.concat(volume_df) if volume_df else pd.DataFrame()
+        # === Stock Selection ===
+        st.subheader("🔍 Stock Visualizer")
+        selected_ticker = st.selectbox("Select Stock to Visualize", sorted(df['Ticker'].unique()))
+        selected_isin = df[df['Ticker'] == selected_ticker]['ISIN'].iloc[0]
+        selected_df = analysis_frames[selected_isin]
 
-    # === Helper: ISIN to Ticker Map ===
-    isin_map = df[['ISIN', 'TckrSymb']].drop_duplicates().set_index('ISIN')['TckrSymb'].to_dict()
+        # === Price Chart ===
+        st.markdown("### Price vs Std Dev Bands")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=selected_df['Date'], y=selected_df['Price'], mode='lines+markers', name='Price'))
+        fig.add_trace(go.Scatter(x=selected_df['Date'], y=selected_df['Upper_Band'], line=dict(dash='dash'), name='Upper Band'))
+        fig.add_trace(go.Scatter(x=selected_df['Date'], y=selected_df['Lower_Band'], line=dict(dash='dash'), name='Lower Band'))
+        st.plotly_chart(fig, use_container_width=True)
 
-    # === Volume Chart ===
-    st.subheader("📊 Volume Over Time")
-    fig = px.bar(df, x='TradDt', y='TtlTradgVol', color='TckrSymb', title="Total Trading Volume by Date")
-    st.plotly_chart(fig, use_container_width=True)
+        # === Volume Histogram ===
+        st.markdown("### Volume Histogram")
+        st.plotly_chart(px.histogram(selected_df, x='Date', y='Volume', nbins=30, title="Volume Distribution"), use_container_width=True)
 
-    # === Alert Display ===
-    st.subheader("🚨 Alerts")
+        # === Alert Tables ===
+        st.subheader("🚨 Alerts Summary")
+        col1, col2, col3 = st.columns(3)
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        with st.expander(f"📍 Buzzing Stocks ({len(buzzing_isins)})"):
-            if buzzing_isins:
+        with col1:
+            with st.expander(f"📍 Buzzing Stocks ({len(buzzing_isins)})"):
                 buzz_data = [{'Ticker': isin_map[i], 'ISIN': i} for i in sorted(buzzing_isins)]
                 st.dataframe(pd.DataFrame(buzz_data))
-            else:
-                st.write("No buzzing stocks.")
 
-    with col2:
-        with st.expander(f"🔥 Price Alerts ({len(alert_df)})"):
-            if not alert_df.empty:
-                alert_df['Ticker'] = alert_df['ISIN'].map(isin_map)
-                st.dataframe(alert_df[['TradDt', 'Ticker', 'ClsPric']])
-            else:
-                st.write("No price alerts triggered.")
+        with col2:
+            with st.expander(f"🔥 Price Alerts ({len(alert_df)})"):
+                if not alert_df.empty:
+                    alert_df['Ticker'] = alert_df['ISIN'].map(isin_map)
+                    st.dataframe(alert_df[['Date', 'Ticker', 'Price']])
 
-    with col3:
-        with st.expander(f"📊 Volume Spikes ({len(volume_df)})"):
-            if not volume_df.empty:
-                volume_df['Ticker'] = volume_df['ISIN'].map(isin_map)
-                st.dataframe(volume_df[['TradDt', 'Ticker', 'TtlTradgVol']])
-            else:
-                st.write("No volume spikes detected.")
+        with col3:
+            with st.expander(f"📊 Volume Spikes ({len(volume_df)})"):
+                if not volume_df.empty:
+                    volume_df['Ticker'] = volume_df['ISIN'].map(isin_map)
+                    st.dataframe(volume_df[['Date', 'Ticker', 'Volume']])
 
-    # === Download Filtered Data ===
-    st.subheader("⬇️ Download")
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Filtered Data", csv, "filtered_data.csv", "text/csv")
+        # Download
+        st.subheader("⬇️ Download Filtered Data")
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download CSV", csv, "filtered_data.csv", "text/csv")
+
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
