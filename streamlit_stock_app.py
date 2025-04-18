@@ -5,40 +5,32 @@ import plotly.express as px
 import requests
 from io import StringIO
 import os
-from html.parser import HTMLParser
 
 st.set_page_config(page_title="NSE Stock Analyzer", layout="wide")
 st.title("📊 NSE Stock Analyzer with Std Dev & Volume Alerts")
 
-GITHUB_REPO_URL = "https://github.com/Finpro-Sam/stock_analyser"
+GITHUB_API_URL = "https://api.github.com/repos/Finpro-Sam/stock_analyser/contents/"
 RAW_BASE_URL = "https://raw.githubusercontent.com/Finpro-Sam/stock_analyser/main/"
 
-class LinkParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.links = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag == 'a':
-            for attr in attrs:
-                if attr[0] == 'href' and attr[1].endswith('.csv'):
-                    self.links.append(attr[1].split('/')[-1])
-
 def list_csv_files_from_github():
-    response = requests.get(GITHUB_REPO_URL)
-    parser = LinkParser()
-    parser.feed(response.text)
-    return list(set(parser.links))
+    try:
+        response = requests.get(GITHUB_API_URL)
+        response.raise_for_status()
+        contents = response.json()
+        return [item['name'] for item in contents if item['name'].endswith('.csv')]
+    except Exception as e:
+        st.warning(f"Error fetching file list: {e}")
+        return []
 
-@st.cache_data
-
+@st.cache_data(show_spinner=False)
 def load_all_csvs_from_github():
     filenames = list_csv_files_from_github()
     all_data = []
     for filename in filenames:
-        raw_url = RAW_BASE_URL + filename
-        file_response = requests.get(raw_url)
-        if file_response.status_code == 200:
+        try:
+            raw_url = RAW_BASE_URL + filename
+            file_response = requests.get(raw_url)
+            file_response.raise_for_status()
             df = pd.read_csv(StringIO(file_response.text))
             df.columns = df.columns.str.strip()
             df.rename(columns={
@@ -48,9 +40,16 @@ def load_all_csvs_from_github():
                 'ClsPric': 'Price',
                 'TtlTradgVol': 'Volume'
             }, inplace=True)
+            df = df[['Date', 'ISIN', 'Ticker', 'Price', 'Volume']]
+            df.dropna(subset=['Date', 'Price', 'Volume'], inplace=True)
             df['Date'] = pd.to_datetime(df['Date'])
             all_data.append(df)
-    return pd.concat(all_data, ignore_index=True)
+        except Exception as e:
+            st.warning(f"Failed to load {filename}: {e}")
+    if all_data:
+        return pd.concat(all_data, ignore_index=True)
+    else:
+        raise ValueError("No valid CSV files could be loaded from GitHub.")
 
 try:
     df = load_all_csvs_from_github()
